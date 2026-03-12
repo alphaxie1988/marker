@@ -455,13 +455,15 @@ def render_marking_tab():
 
     st.divider()
 
-    # --- Per-candidate accordions ---
+    # --- Per-candidate results ---
     for r in results:
         wt = r["weighted_total"]
         score_label = f"{wt}% (weighted)" if wt is not None else "Unknown paper"
-        expander_title = f"📄 {r['filename']} — {r['paper_name']} — {score_label}"
 
-        with st.expander(expander_title, expanded=False):
+        with st.container(border=True):
+            st.markdown(f"### 📄 {r['filename']}")
+            st.markdown(f"**Paper:** {r['paper_name']} &nbsp;|&nbsp; **Score:** {score_label}")
+
             if r.get("error"):
                 st.error(f"Error during marking: {r['error']}")
                 continue
@@ -469,8 +471,6 @@ def render_marking_tab():
             if r["paper_id"] is None:
                 st.warning("Paper type could not be detected. No detection keyword matched.")
                 continue
-
-            st.markdown(f"**Paper detected:** {r['paper_name']}")
 
             if not r["question_results"]:
                 st.info("No questions defined for this paper.")
@@ -496,7 +496,7 @@ def render_marking_tab():
                     qr["score"],
                     qr["max_score"],
                     qr["justification"],
-                    f"Score",
+                    "Score",
                 )
 
     # --- CSV Export ---
