@@ -476,13 +476,17 @@ def render_marking_tab():
                 st.info("No questions defined for this paper.")
                 continue
 
-            for qr in r["question_results"]:
+            for idx, qr in enumerate(r["question_results"]):
                 st.markdown(f"---\n**{qr['label']}**")
 
                 if qr.get("warning"):
                     st.warning(f"Extraction warning: {qr['warning']}")
 
-                with st.expander("Extracted Answer", expanded=False):
+                show_answer = st.checkbox(
+                    "Show extracted answer",
+                    key=f"show_ans_{r['filename']}_{idx}",
+                )
+                if show_answer:
                     if qr["answer"]:
                         st.text(qr["answer"])
                     else:
