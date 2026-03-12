@@ -456,7 +456,7 @@ def render_marking_tab():
     st.divider()
 
     # --- Per-candidate results ---
-    for r in results:
+    for cidx, r in enumerate(results):
         wt = r["weighted_total"]
         score_label = f"{wt}% (weighted)" if wt is not None else "Unknown paper"
 
@@ -484,7 +484,7 @@ def render_marking_tab():
 
                 show_answer = st.checkbox(
                     "Show extracted answer",
-                    key=f"show_ans_{r['filename']}_{idx}",
+                    key=f"show_ans_{cidx}_{idx}",
                 )
                 if show_answer:
                     if qr["answer"]:
