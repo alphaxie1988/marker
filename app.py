@@ -7,6 +7,61 @@ import pandas as pd
 from docx import Document
 from openai import OpenAI
 
+# ---------------------------------------------------------------------------
+# MinIO / S3 config  (commented out — enable when MinIO is available)
+# ---------------------------------------------------------------------------
+# To use MinIO, install the SDK:  pip install minio
+#
+# from minio import Minio
+# from minio.error import S3Error
+#
+# MINIO_ENDPOINT   = "localhost:9000"       # e.g. "minio.example.com:9000"
+# MINIO_ACCESS_KEY = "your-access-key"
+# MINIO_SECRET_KEY = "your-secret-key"
+# MINIO_BUCKET     = "exam-marker"          # bucket must already exist
+# MINIO_CONFIG_KEY = "config.json"          # object key (path) inside the bucket
+# MINIO_USE_SSL    = False                  # set True for HTTPS endpoints
+#
+# def _get_minio_client() -> "Minio":
+#     """Return a configured MinIO client."""
+#     return Minio(
+#         MINIO_ENDPOINT,
+#         access_key=MINIO_ACCESS_KEY,
+#         secret_key=MINIO_SECRET_KEY,
+#         secure=MINIO_USE_SSL,
+#     )
+#
+# def load_config_from_minio() -> dict | None:
+#     """
+#     Download config.json from MinIO and return it as a dict.
+#     Returns None if the object does not exist yet.
+#     """
+#     client = _get_minio_client()
+#     try:
+#         response = client.get_object(MINIO_BUCKET, MINIO_CONFIG_KEY)
+#         data = response.read()
+#         return json.loads(data.decode("utf-8"))
+#     except S3Error as e:
+#         if e.code == "NoSuchKey":
+#             return None          # first run — no config stored yet
+#         raise                    # re-raise unexpected errors
+#
+# def save_config_to_minio(cfg: dict) -> None:
+#     """Serialise cfg and upload it to MinIO, replacing any existing object."""
+#     client = _get_minio_client()
+#     data = json.dumps(cfg, indent=2, ensure_ascii=False).encode("utf-8")
+#     client.put_object(
+#         MINIO_BUCKET,
+#         MINIO_CONFIG_KEY,
+#         data=io.BytesIO(data),
+#         length=len(data),
+#         content_type="application/json",
+#     )
+
+# ---------------------------------------------------------------------------
+# Local config fallback  (active while MinIO is unavailable)
+# ---------------------------------------------------------------------------
+
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 
 # ---------------------------------------------------------------------------
@@ -14,6 +69,13 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.json")
 # ---------------------------------------------------------------------------
 
 def load_config() -> dict:
+    # --- MinIO path (uncomment to enable) ---
+    # minio_cfg = load_config_from_minio()
+    # if minio_cfg is not None:
+    #     return minio_cfg
+    # # Fall through to local file if MinIO returned nothing
+    # -----------------------------------------
+
     if not os.path.exists(CONFIG_PATH):
         default = {"openai_api_key": "", "openai_model": "gpt-4o", "papers": {}}
         save_config(default)
@@ -23,6 +85,11 @@ def load_config() -> dict:
 
 
 def save_config(cfg: dict) -> None:
+    # --- MinIO path (uncomment to enable) ---
+    # save_config_to_minio(cfg)
+    # return
+    # -----------------------------------------
+
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, indent=2, ensure_ascii=False)
 
@@ -144,6 +211,30 @@ def mark_document(client: OpenAI, model: str, text: str, paper: dict) -> list[di
             "weight": weight,
         })
     return results
+
+
+def mark_question(client: OpenAI, model: str, text: str, qid: str, qdata: dict) -> dict:
+    """Mark a single question and return the result dict."""
+    label = qdata.get("label", qid)
+    start_text = qdata.get("start_text", "")
+    end_text = qdata.get("end_text", "")
+    max_score = int(qdata.get("max_score", 1))
+    weight = float(qdata.get("weight", 1.0))
+    rubric = qdata.get("rubric", "")
+
+    answer, warning = extract_answer(text, start_text, end_text)
+    marking = mark_answer(client, model, rubric, max_score, answer)
+
+    return {
+        "qid": qid,
+        "label": label,
+        "answer": answer,
+        "warning": warning,
+        "score": marking["score"],
+        "justification": marking["justification"],
+        "max_score": max_score,
+        "weight": weight,
+    }
 
 
 def compute_weighted_total(question_results: list[dict]) -> float | None:
@@ -409,33 +500,63 @@ def render_marking_tab():
         client = OpenAI(api_key=api_key)
         all_results = []
 
-        with st.spinner("Marking papers…"):
-            for uploaded_file in uploaded_files:
-                file_bytes = uploaded_file.read()
-                text = extract_text_from_docx(file_bytes)
-                pid, paper_name = detect_paper(text, papers)
+        total_files = len(uploaded_files)
+        status_text = st.empty()
+        progress_bar = st.progress(0)
 
-                candidate_result = {
-                    "filename": uploaded_file.name,
-                    "paper_id": pid,
-                    "paper_name": paper_name or "Unknown",
-                    "question_results": [],
-                    "weighted_total": None,
-                }
+        for file_idx, uploaded_file in enumerate(uploaded_files):
+            file_label = f"[{file_idx + 1}/{total_files}] {uploaded_file.name}"
 
-                if pid is not None:
-                    paper = papers[pid]
-                    try:
-                        q_results = mark_document(client, model, text, paper)
-                        candidate_result["question_results"] = q_results
-                        candidate_result["weighted_total"] = compute_weighted_total(q_results)
-                    except Exception as e:
-                        candidate_result["error"] = str(e)
+            # Stage 1: Extract text
+            status_text.info(f"**{file_label}** — Extracting text from document…")
+            progress_bar.progress(file_idx / total_files)
 
-                all_results.append(candidate_result)
+            file_bytes = uploaded_file.read()
+            text = extract_text_from_docx(file_bytes)
 
+            # Stage 2: Detect paper type
+            status_text.info(f"**{file_label}** — Detecting paper type…")
+            progress_bar.progress(file_idx / total_files + 0.1 / total_files)
+
+            pid, paper_name = detect_paper(text, papers)
+
+            candidate_result = {
+                "filename": uploaded_file.name,
+                "paper_id": pid,
+                "paper_name": paper_name or "Unknown",
+                "question_results": [],
+                "weighted_total": None,
+            }
+
+            if pid is not None:
+                paper = papers[pid]
+                questions = paper.get("questions", {})
+                num_questions = max(len(questions), 1)
+                q_results = []
+                try:
+                    for q_idx, (qid, qdata) in enumerate(questions.items()):
+                        q_label = qdata.get("label", qid)
+                        status_text.info(
+                            f"**{file_label}** — Marking **{q_label}** "
+                            f"(question {q_idx + 1}/{num_questions})…"
+                        )
+                        # Progress within this file: 0.2 reserved for extract+detect, 0.8 for questions
+                        within = 0.2 + 0.8 * (q_idx / num_questions)
+                        progress_bar.progress(file_idx / total_files + within / total_files)
+
+                        q_result = mark_question(client, model, text, qid, qdata)
+                        q_results.append(q_result)
+
+                    candidate_result["question_results"] = q_results
+                    candidate_result["weighted_total"] = compute_weighted_total(q_results)
+                except Exception as e:
+                    candidate_result["error"] = str(e)
+
+            all_results.append(candidate_result)
+
+        progress_bar.progress(1.0)
+        status_text.success("Marking complete!")
         st.session_state.marking_results = all_results
-        st.success("Marking complete.")
 
     results = st.session_state.marking_results
 
@@ -444,13 +565,18 @@ def render_marking_tab():
 
     # --- Summary table ---
     st.subheader("Summary")
+    show_q_scores = st.checkbox("Show individual question scores", key="show_q_scores")
     summary_rows = []
     for r in results:
-        summary_rows.append({
+        row: dict = {
             "Filename": r["filename"],
             "Paper": r["paper_name"],
             "Weighted Score": f"{r['weighted_total']}%" if r["weighted_total"] is not None else "N/A",
-        })
+        }
+        if show_q_scores:
+            for qr in r.get("question_results", []):
+                row[qr["label"]] = f"{qr['score']}/{qr['max_score']}"
+        summary_rows.append(row)
     st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
 
     st.divider()
@@ -459,11 +585,9 @@ def render_marking_tab():
     for cidx, r in enumerate(results):
         wt = r["weighted_total"]
         score_label = f"{wt}% (weighted)" if wt is not None else "Unknown paper"
+        expander_label = f"📄 {r['filename']}  —  {r['paper_name']}  |  {score_label}"
 
-        with st.container(border=True):
-            st.markdown(f"### 📄 {r['filename']}")
-            st.markdown(f"**Paper:** {r['paper_name']} &nbsp;|&nbsp; **Score:** {score_label}")
-
+        with st.expander(expander_label, expanded=False):
             if r.get("error"):
                 st.error(f"Error during marking: {r['error']}")
                 continue
@@ -482,15 +606,10 @@ def render_marking_tab():
                 if qr.get("warning"):
                     st.warning(f"Extraction warning: {qr['warning']}")
 
-                show_answer = st.checkbox(
-                    "Show extracted answer",
-                    key=f"show_ans_{cidx}_{idx}",
-                )
-                if show_answer:
-                    if qr["answer"]:
-                        st.text(qr["answer"])
-                    else:
-                        st.caption("_(no answer extracted)_")
+                if qr["answer"]:
+                    st.code(qr["answer"], language=None)
+                else:
+                    st.caption("_(no answer extracted)_")
 
                 score_color_widget(
                     qr["score"],
